@@ -60,4 +60,3 @@ def file_sha256(path: Path) -> str:
 def write_canonical_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(canonical_json(value) + "\n", encoding="utf-8", newline="\n")
-

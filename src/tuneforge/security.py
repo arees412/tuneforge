@@ -58,4 +58,3 @@ def validate_artifact_name(value: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", value):
         raise ValueError("artifact identifier contains unsafe characters")
     return value
-

@@ -28,8 +28,7 @@ from tuneforge.domain import (
     TokenizationReport,
     ValidationIssue,
 )
-from tuneforge.utils import canonical_json, file_sha256, sha256_text, stable_digest
-
+from tuneforge.utils import file_sha256, sha256_text, stable_digest
 
 MAX_DATASET_BYTES = 10 * 1024 * 1024
 MAX_RECORDS = 100_000
@@ -81,7 +80,11 @@ def read_records(path: Path, *, max_bytes: int = MAX_DATASET_BYTES) -> list[dict
                 raise ValueError("JSON dataset must be an array or contain a records array")
             records = data
         elif fmt is DatasetFormat.JSONL:
-            records = [json.loads(line) for line in resolved.read_text(encoding="utf-8").splitlines() if line.strip()]
+            records = [
+                json.loads(line)
+                for line in resolved.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
         else:
             with resolved.open("r", encoding="utf-8", newline="") as stream:
                 records = list(csv.DictReader(stream))
@@ -139,7 +142,9 @@ def _normalize_messages(value: Any) -> list[Message]:
     return messages
 
 
-def normalize_record(record: dict[str, Any], index: int, schema_name: DatasetSchema) -> CanonicalTrainingRecord:
+def normalize_record(
+    record: dict[str, Any], index: int, schema_name: DatasetSchema
+) -> CanonicalTrainingRecord:
     unknown = set(record) - _ALLOWED_FIELDS[schema_name]
     if unknown:
         raise ValueError(f"unsupported fields: {', '.join(sorted(unknown))}")
@@ -205,7 +210,9 @@ def validate_records(
                 raise ValueError(f"mixed dataset schemas: expected {detected}, found {schema_name}")
             normalized.append(normalize_record(record, index, schema_name))
         except (ValueError, TypeError) as exc:
-            issues.append(ValidationIssue(record_index=index, code="invalid_record", message=str(exc)))
+            issues.append(
+                ValidationIssue(record_index=index, code="invalid_record", message=str(exc))
+            )
     if not records:
         issues.append(ValidationIssue(code="empty_dataset", message="dataset contains no records"))
     return DatasetValidationResult(
@@ -216,7 +223,9 @@ def validate_records(
     )
 
 
-def validate_dataset(path: Path, declared_schema: DatasetSchema | None = None) -> DatasetValidationResult:
+def validate_dataset(
+    path: Path, declared_schema: DatasetSchema | None = None
+) -> DatasetValidationResult:
     try:
         return validate_records(read_records(path), declared_schema)
     except ValueError as exc:
@@ -246,7 +255,9 @@ def find_duplicates(records: list[CanonicalTrainingRecord]) -> list[DuplicateFin
         if exact_key in exact_seen:
             findings.append(
                 DuplicateFinding(
-                    kept_record_id=exact_seen[exact_key], duplicate_record_id=record.id, reason="exact"
+                    kept_record_id=exact_seen[exact_key],
+                    duplicate_record_id=record.id,
+                    reason="exact",
                 )
             )
         elif normalized_key in normalized_seen:
@@ -273,14 +284,26 @@ def deduplicate(
 def split_records(records: list[CanonicalTrainingRecord], config: SplitConfig) -> DatasetSplit:
     buckets: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
     if config.algorithm == "stable_hash":
-        scored = [(int(sha256_text(f"{config.seed}:{record.id}")[:16], 16) / 16**16, record.id) for record in records]
+        scored = [
+            (int(sha256_text(f"{config.seed}:{record.id}")[:16], 16) / 16**16, record.id)
+            for record in records
+        ]
     else:
         record_ids = [record.id for record in records]
         random.Random(config.seed).shuffle(record_ids)
-        scored = [((index + 0.5) / max(1, len(record_ids)), record_id) for index, record_id in enumerate(record_ids)]
+        scored = [
+            ((index + 0.5) / max(1, len(record_ids)), record_id)
+            for index, record_id in enumerate(record_ids)
+        ]
     validation_edge = config.train_ratio + config.validation_ratio
     for score, record_id in scored:
-        bucket = "train" if score < config.train_ratio else "validation" if score < validation_edge else "test"
+        bucket = (
+            "train"
+            if score < config.train_ratio
+            else "validation"
+            if score < validation_edge
+            else "test"
+        )
         buckets[bucket].append(record_id)
     for values in buckets.values():
         values.sort()
@@ -315,16 +338,18 @@ def detect_leakage(
     }
     for split_name, records in split_records_map.items():
         for record in records:
-            indexes["identical_record"][stable_digest(record.model_dump(exclude={"id"}))].append((split_name, record.id))
+            indexes["identical_record"][stable_digest(record.model_dump(exclude={"id"}))].append(
+                (split_name, record.id)
+            )
             if check_prompts:
-                indexes["identical_prompt"][sha256_text(" ".join(record.prompt.casefold().split()))].append(
-                    (split_name, record.id)
-                )
+                indexes["identical_prompt"][
+                    sha256_text(" ".join(record.prompt.casefold().split()))
+                ].append((split_name, record.id))
             target = record.response or record.chosen
             if check_targets and target:
-                indexes["identical_target"][sha256_text(" ".join(target.casefold().split()))].append(
-                    (split_name, record.id)
-                )
+                indexes["identical_target"][
+                    sha256_text(" ".join(target.casefold().split()))
+                ].append((split_name, record.id))
     for reason, index in indexes.items():
         for occurrences in index.values():
             for left_index, left in enumerate(occurrences):
@@ -346,9 +371,13 @@ def analyze_tokenization(
     records: list[CanonicalTrainingRecord], tokenizer: TokenizerLike, max_length: int
 ) -> TokenizationReport:
     input_tokens = [len(tokenizer.encode(record.prompt)) for record in records]
-    target_tokens = [len(tokenizer.encode(record.response or record.chosen or "")) for record in records]
+    target_tokens = [
+        len(tokenizer.encode(record.response or record.chosen or "")) for record in records
+    ]
     combined = [left + right for left, right in zip(input_tokens, target_tokens, strict=True)]
-    over_limit = [record.id for record, length in zip(records, combined, strict=True) if length > max_length]
+    over_limit = [
+        record.id for record, length in zip(records, combined, strict=True) if length > max_length
+    ]
     return TokenizationReport(
         tokenizer=tokenizer.name,
         input_tokens=input_tokens,
@@ -370,7 +399,9 @@ def build_quality_report(
     input_lengths = [len(record.prompt) for record in records]
     output_lengths = [len(record.response or record.chosen or "") for record in records]
     sensitive_pattern = re.compile(r"(?i)(api[_-]?key|bearer\s+[a-z0-9._-]+|password\s*[:=])")
-    sensitivity_warnings = sum(bool(sensitive_pattern.search(_normalized_text(record))) for record in records)
+    sensitivity_warnings = sum(
+        bool(sensitive_pattern.search(_normalized_text(record))) for record in records
+    )
     return DataQualityReport(
         total_records=len(records) + invalid_records,
         valid_records=len(records),
@@ -379,11 +410,16 @@ def build_quality_report(
         empty_targets=sum(length == 0 for length in output_lengths),
         average_input_length=fmean(input_lengths) if input_lengths else 0.0,
         average_output_length=fmean(output_lengths) if output_lengths else 0.0,
-        max_length=max((left + right for left, right in zip(input_lengths, output_lengths, strict=True)), default=0),
+        max_length=max(
+            (left + right for left, right in zip(input_lengths, output_lengths, strict=True)),
+            default=0,
+        ),
         schema_violations=invalid_records,
         split_leakage=len(leakage_findings or []),
         sensitivity_warnings=sensitivity_warnings,
-        license_metadata_available=bool(license_metadata and license_metadata.identifier != "unknown"),
+        license_metadata_available=bool(
+            license_metadata and license_metadata.identifier != "unknown"
+        ),
     )
 
 
@@ -403,7 +439,9 @@ def build_dataset_manifest(
     clean_records = deduplicate(validation.records, duplicates)
     split = split_records(clean_records, split_config)
     lookup = {record.id: record for record in clean_records}
-    by_split = {name: [lookup[record_id] for record_id in ids] for name, ids in split.record_ids.items()}
+    by_split = {
+        name: [lookup[record_id] for record_id in ids] for name, ids in split.record_ids.items()
+    }
     leakage = detect_leakage(by_split)
     license_value = license_metadata or LicenseMetadata()
     source = DatasetSource(

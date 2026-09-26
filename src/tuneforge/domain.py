@@ -130,7 +130,7 @@ class SplitConfig(StrictModel):
     algorithm: Literal["stable_hash", "seeded_random"] = "stable_hash"
 
     @model_validator(mode="after")
-    def validate_ratios(self) -> "SplitConfig":
+    def validate_ratios(self) -> SplitConfig:
         total = self.train_ratio + self.validation_ratio + self.test_ratio
         if abs(total - 1.0) > 1e-9:
             raise ValueError("split ratios must sum to 1.0")
@@ -197,7 +197,7 @@ class ModelSpec(StrictModel):
     modality: Modality = Modality.TEXT
 
     @model_validator(mode="after")
-    def reject_remote_code(self) -> "ModelSpec":
+    def reject_remote_code(self) -> ModelSpec:
         if self.trust_remote_code_required and not self.trust_remote_code_allowed:
             raise ValueError("model requires remote code but operator opt-in is disabled")
         return self
@@ -421,4 +421,3 @@ class TrainingEvidence(StrictModel):
     registry_status: RegistryStatus | None = None
     final_state: RunState
     evidence_hash: str
-

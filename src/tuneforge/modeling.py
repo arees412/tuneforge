@@ -19,7 +19,6 @@ from tuneforge.domain import (
 )
 from tuneforge.utils import stable_digest
 
-
 TINY_MODEL_ID = "tuneforge-local-tiny-gpt2"
 
 
@@ -30,7 +29,6 @@ def create_tiny_model(*, seed: int = 42) -> GPT2LMHeadModel:
     config = GPT2Config(
         vocab_size=128,
         n_positions=32,
-        n_ctx=32,
         n_embd=32,
         n_layer=1,
         n_head=2,
@@ -38,12 +36,14 @@ def create_tiny_model(*, seed: int = 42) -> GPT2LMHeadModel:
         eos_token_id=2,
         pad_token_id=0,
     )
-    return GPT2LMHeadModel(config)
+    return GPT2LMHeadModel(config)  # type: ignore[no-untyped-call]
 
 
 def parameter_report(model: nn.Module) -> dict[str, float | int]:
     total = sum(parameter.numel() for parameter in model.parameters())
-    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    trainable = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
     return {
         "total_parameters": total,
         "trainable_parameters": trainable,
@@ -133,4 +133,3 @@ __all__ = [
     "tiny_model_spec",
     "validate_target_modules",
 ]
-

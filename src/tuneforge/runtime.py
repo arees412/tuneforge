@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import platform
-import sys
 
 import torch
 
@@ -57,7 +56,8 @@ def estimate_resources(
         activation_risk=risk,
         estimated_checkpoint_bytes=checkpoint,
         disclaimer=(
-            "Planning estimate only; it is not a guaranteed measurement of host or accelerator memory."
+            "Planning estimate only; it is not a guaranteed measurement of host "
+            "or accelerator memory."
         ),
     )
 
@@ -80,4 +80,3 @@ def validate_precision(precision: str, runtime: RuntimeCapabilities) -> None:
 
 
 __all__ = ["detect_runtime", "estimate_resources", "require_qlora_capability", "validate_precision"]
-

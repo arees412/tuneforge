@@ -76,7 +76,9 @@ def build_training_plan(
         "warnings": warnings,
         "resource_estimate": estimate,
     }
-    return TrainingPlan(**payload, plan_hash=stable_digest(payload))
+    plan = TrainingPlan(**payload, plan_hash="pending")
+    plan.plan_hash = stable_digest(plan.model_dump(exclude={"plan_hash"}, exclude_none=True))
+    return plan
 
 
 __all__ = ["build_training_plan", "effective_batch_size"]
