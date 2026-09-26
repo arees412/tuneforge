@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/tuneforge-core]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: latest-known
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Strict type check
+        run: uv run mypy src
+
+      - name: Run offline tests including real CPU full and LoRA training
+        run: uv run pytest --cov=tuneforge --cov-report=term-missing
+
+      - name: Check repository safety and documentation links
+        run: uv run python scripts/check_repository.py
+
+      - name: Build package
+        run: uv build
+
+      - name: Verify package and CLI imports
+        run: |
+          uv run python -c "import tuneforge; import tuneforge.api; print(tuneforge.__version__)"
+          uv run tuneforge --help
+
+      - name: Verify tracked tree was not mutated
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=no)"
+
