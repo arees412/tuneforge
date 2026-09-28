@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -21,9 +21,14 @@ _SECRET_PATTERNS = (
 def confined_path(root: Path, relative: str | Path, *, must_exist: bool = False) -> Path:
     """Resolve a relative artifact path and reject absolute paths and traversal."""
 
-    candidate = Path(relative)
-    if candidate.is_absolute():
+    raw_path = str(relative)
+    posix_path = PurePosixPath(raw_path)
+    windows_path = PureWindowsPath(raw_path)
+    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
         raise PathSecurityError("absolute artifact paths are not allowed")
+    if ".." in posix_path.parts or ".." in windows_path.parts:
+        raise PathSecurityError("artifact path traversal is not allowed")
+    candidate = Path(raw_path)
     root_resolved = root.resolve()
     resolved = (root_resolved / candidate).resolve(strict=must_exist)
     try:

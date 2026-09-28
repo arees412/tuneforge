@@ -127,6 +127,12 @@ def test_path_confinement_artifact_names_and_publisher_boundary(tmp_path: Path) 
         confined_path(tmp_path, "../escape")
     with pytest.raises(PathSecurityError):
         confined_path(tmp_path, Path("C:/absolute"))
+    with pytest.raises(PathSecurityError):
+        confined_path(tmp_path, r"..\escape")
+    with pytest.raises(PathSecurityError):
+        confined_path(tmp_path, r"\\server\share\artifact")
+    with pytest.raises(PathSecurityError):
+        confined_path(tmp_path, "C:drive-relative")
     assert validate_artifact_name("run-123") == "run-123"
     with pytest.raises(ValueError):
         validate_artifact_name("../run")
