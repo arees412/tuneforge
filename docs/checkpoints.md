@@ -7,4 +7,3 @@ Artifacts live under `artifacts/runs/<run-id>/checkpoints/step-<n>`. Absolute pa
 Model or adapter weights use safetensors through `save_pretrained`. Full PyTorch optimizer-state serialization is intentionally absent; TuneForge does not automatically load untrusted pickle artifacts.
 
 Resume recomputes every artifact hash and requires exact model-manifest and training-config compatibility. A mismatch or tampered file fails closed.
-

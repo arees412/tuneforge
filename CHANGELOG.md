@@ -7,4 +7,3 @@
 - Added real local tiny full and PEFT LoRA training with measured metrics and safetensors checkpoint reload.
 - Added SQLite tracking, checkpoint governance, deterministic evaluation/comparison, model registry, evidence bundles, training reports, model-card drafts, provenance, and redacted audit events.
 - Added FastAPI, Typer, twelve executable scenarios, extensive tests, offline CI, and project documentation.
-

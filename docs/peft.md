@@ -7,4 +7,3 @@ The TuneForge LoRA manifest records rank, alpha, dropout, target modules, bias p
 For every adapter execution TuneForge computes total, trainable, and trainable-percentage values from the actual model. CI verifies that adapter injection produces a positive trainable count smaller than the total, that gradients and optimizer steps occur, that safetensors adapter files are written, and that the adapter reloads over the same deterministic base configuration.
 
 QLoRA configuration captures 4-bit loading, NF4/FP4, compute dtype, and double quantization. TuneForge does not substitute a CPU simulation for bitsandbytes/CUDA execution. GPU QLoRA remains optional and unverified in routine CI.
-

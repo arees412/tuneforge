@@ -18,4 +18,3 @@ The default stable-hash split uses each canonical record ID plus a seed. A seede
 The quality report includes valid/invalid counts, duplicates, empty targets, lengths, violations, leakage, sensitivity warnings, and license-metadata availability. The built-in whitespace tokenizer provides offline deterministic token-count analysis; it is not presented as the production model tokenizer.
 
 Dataset license fields are operator-supplied metadata. `unknown` is the safe default. TuneForge does not infer licensing rights from a source location and does not provide legal advice.
-

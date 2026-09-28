@@ -7,4 +7,3 @@ The end-to-end demo measures language-model loss for a locally constructed rando
 `assert_no_evaluation_contamination` rejects exact normalized prompt/target overlaps between training and evaluation records. Dataset split leakage is also checked before the plan can execute.
 
 Registry approval requires an existing evaluation record. TuneForge never chooses a winner without an explicit comparison rule, and it records warnings when comparable metrics are absent.
-

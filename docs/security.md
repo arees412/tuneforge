@@ -18,4 +18,3 @@ Controls in v0.1 include:
 Residual risks include dependency or model supply-chain compromise, operator-provided malicious content, denial of service within configured limits, sensitive data intentionally placed in metadata, hardware-specific numerical differences, and future publisher misuse. Operators must isolate sensitive datasets, restrict filesystem permissions, verify source and artifact licenses, pin reviewed dependencies, and protect tokens outside TuneForge.
 
 TuneForge does not claim SOC 2, HIPAA, GDPR, PCI DSS, or any other compliance certification. These controls are engineering safeguards, not a compliance determination or legal advice.
-

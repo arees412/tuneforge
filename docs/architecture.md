@@ -30,4 +30,3 @@ Core modules:
 The `TrainerBackend` contract leaves room for a future documented Transformers or TRL integration. v0.1 uses the governed direct PyTorch backend so CI proves every optimizer step without network access.
 
 VLM modality types and schema boundaries are represented, but no image processor or multimodal trainer is supplied. This boundary prevents a configuration abstraction from being misrepresented as working VLM training.
-

@@ -15,4 +15,3 @@ Run states are `created → validated → planned → queued → running → eva
 Resume validates checkpoint hashes, model-manifest compatibility, and training-configuration compatibility. Weight/adapter state resumes into a new governed run linked to the source run. Optimizer-state resume is intentionally unsupported because v0.1 does not load arbitrary pickle checkpoints.
 
 Precision requests fail before training when the runtime cannot support them. Early stopping, multi-GPU orchestration, model merging, and arbitrary pretrained model loading are intentionally unsupported in v0.1.
-

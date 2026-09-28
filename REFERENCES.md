@@ -19,4 +19,3 @@ Reviewed on 2026-09-26. These primary sources informed architecture and public A
 TuneForge was designed and written from the specification and documented public APIs. It does not copy source code, tests, prompts, README text, model cards, branding, benchmark claims, or commit history from LLaMA-Factory, PEFT, TRL, Transformers, Accelerate, PyTorch, or other upstream projects. Their names identify third-party dependencies or research sources, not TuneForge authorship.
 
 This project does not redistribute upstream model weights or datasets. Operators are responsible for validating separate model and dataset license terms.
-

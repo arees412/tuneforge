@@ -23,4 +23,3 @@ SQLite stores queryable metadata while canonical JSON and safetensors hold porta
 ## ADR-006: Safe serialization boundary
 
 Weights and adapters use safetensors. Optimizer pickle loading, model merging, remote code, automated Hub publication, distributed scheduling, and full VLM training are intentionally unsupported in v0.1.
-

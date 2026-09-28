@@ -18,4 +18,3 @@ The test suite covers dataset formats and schemas, duplicate/leakage behavior, d
 No test downloads model weights or requires a Hugging Face/OpenAI token, paid API, or GPU. Generated artifacts belong outside Git. Do not relax a fail-closed guard to make a fixture pass.
 
 Use conventional, focused commits. Changes to lifecycle transitions, manifests, checkpoint formats, capability gates, or evidence schemas require tests and a note in [decisions.md](decisions.md) or [CHANGELOG.md](../CHANGELOG.md).
-

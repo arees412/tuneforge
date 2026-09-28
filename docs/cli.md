@@ -9,4 +9,3 @@
 - `capabilities`, `demo`, and `eval`
 
 `demo` executes one LoRA workflow. `eval` executes all twelve specification acceptance scenarios, including real full and LoRA training plus negative security/failure paths. Both write only to the selected ignored root.
-
