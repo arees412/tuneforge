@@ -247,7 +247,7 @@ class TrainingConfig(StrictModel):
     learning_rate: float = Field(default=5e-4, gt=0, le=1)
     weight_decay: float = Field(default=0.0, ge=0, le=1)
     warmup_ratio: float = Field(default=0.0, ge=0, lt=1)
-    per_device_batch_size: int = Field(default=2, gt=0, le=1024)
+    per_device_batch_size: int = Field(default=1, gt=0, le=1024)
     gradient_accumulation: int = Field(default=1, gt=0, le=1024)
     max_sequence_length: int = Field(default=32, ge=4, le=131_072)
     optimizer: Literal["adamw"] = "adamw"
@@ -290,6 +290,7 @@ class ResourceEstimate(StrictModel):
 
 
 class TrainingPlan(StrictModel):
+    training_config_hash: str | None = None
     dataset_fingerprint: str
     model_manifest_hash: str
     method: TrainingMethod
@@ -339,6 +340,7 @@ class TrainingMetric(StrictModel):
 
 
 class CheckpointManifest(StrictModel):
+    dataset_fingerprint: str | None = None
     checkpoint_id: str
     run_id: str
     step: int
@@ -411,6 +413,7 @@ class AuditEvent(StrictModel):
 
 class TrainingEvidence(StrictModel):
     run_id: str
+    dataset_fingerprint: str | None = None
     dataset_manifest_hash: str
     model_manifest_hash: str
     training_plan_hash: str

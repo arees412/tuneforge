@@ -48,6 +48,11 @@ def build_training_evidence(
     evaluation: EvaluationResult | None = None,
     registry_status: RegistryStatus | None = None,
 ) -> TrainingEvidence:
+    if (
+        run.dataset_fingerprint != dataset.fingerprint
+        or plan.dataset_fingerprint != dataset.fingerprint
+    ):
+        raise ValueError("evidence dataset fingerprint mismatch")
     checkpoints = store.list_checkpoints(run.id)
     checkpoint_hashes = {
         checkpoint.checkpoint_id: stable_digest(checkpoint) for checkpoint in checkpoints
@@ -55,6 +60,7 @@ def build_training_evidence(
     payload = {
         "run_id": run.id,
         "dataset_manifest_hash": stable_digest(dataset),
+        "dataset_fingerprint": dataset.fingerprint,
         "model_manifest_hash": model.manifest_hash,
         "training_plan_hash": plan.plan_hash,
         "runtime": plan.runtime,

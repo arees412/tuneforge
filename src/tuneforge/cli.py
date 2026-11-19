@@ -9,13 +9,14 @@ from typing import Annotated, Any
 import typer
 from pydantic import BaseModel, ConfigDict, Field
 
-from tuneforge.checkpoints import checkpoint_directory
+from tuneforge.checkpoints import recover_checkpoints
 from tuneforge.dataset import (
     WhitespaceTokenizer,
     analyze_tokenization,
     build_dataset_manifest,
     build_quality_report,
     validate_dataset,
+    verified_split,
 )
 from tuneforge.demo import run_demo
 from tuneforge.domain import (
@@ -28,6 +29,7 @@ from tuneforge.domain import (
     TrainingConfig,
     TrainingMethod,
     TrainingPlan,
+    TrainingRun,
 )
 from tuneforge.evaluation import compare_results, evaluate_language_model_loss
 from tuneforge.modeling import (
@@ -40,9 +42,10 @@ from tuneforge.modeling import (
 from tuneforge.planning import build_training_plan
 from tuneforge.runtime import detect_runtime
 from tuneforge.scenarios import run_scenarios
+from tuneforge.security import confined_path, validate_artifact_name
 from tuneforge.storage import MetadataStore
 from tuneforge.training import DeterministicTrainerBackend, load_checkpoint_model
-from tuneforge.utils import canonical_json
+from tuneforge.utils import canonical_json, stable_digest
 
 app = typer.Typer(
     help="Governed, reproducible local model-training workflows.", no_args_is_help=True
@@ -80,8 +83,8 @@ def _load_workflow(path: Path) -> WorkflowConfig:
 
 def _plan_workflow(
     config: WorkflowConfig,
-) -> tuple[DatasetManifest, list[Any], ModelManifest, TrainingPlan]:
-    dataset, records = build_dataset_manifest(
+) -> tuple[DatasetManifest, ModelManifest, TrainingPlan]:
+    dataset, _ = build_dataset_manifest(
         config.dataset_path,
         config.split,
         license_metadata=config.dataset_license,
@@ -106,7 +109,7 @@ def _plan_workflow(
         trainable_parameters=int(counts["trainable_parameters"]),
         adapter=adapter,
     )
-    return dataset, records, model, plan
+    return dataset, model, plan
 
 
 @dataset_app.command("validate")
@@ -149,21 +152,21 @@ def dataset_split(
 @app.command("plan")
 def plan(config: Annotated[Path, typer.Argument(exists=True, dir_okay=False)]) -> None:
     workflow = _load_workflow(config)
-    dataset, _, model, training_plan = _plan_workflow(workflow)
+    dataset, model, training_plan = _plan_workflow(workflow)
     _echo({"dataset_manifest": dataset, "model_manifest": model, "training_plan": training_plan})
 
 
 @app.command("train")
 def train(config: Annotated[Path, typer.Argument(exists=True, dir_okay=False)]) -> None:
     workflow = _load_workflow(config)
-    dataset, records, model, training_plan = _plan_workflow(workflow)
+    dataset, model, training_plan = _plan_workflow(workflow)
     store = MetadataStore(workflow.artifact_root / "tuneforge.sqlite3")
     store.register_dataset(dataset.fingerprint, dataset)
     outcome = DeterministicTrainerBackend().execute(
         training_plan,
         model,
         workflow.training,
-        records,
+        dataset,
         workflow.artifact_root,
         store,
     )
@@ -176,47 +179,61 @@ def train(config: Annotated[Path, typer.Argument(exists=True, dir_okay=False)]) 
     )
 
 
+def _recovery_paths(root: Path, run_id: str) -> tuple[MetadataStore, Path, Path]:
+    validate_artifact_name(run_id)
+    db = confined_path(root, "tuneforge.sqlite3", must_exist=True)
+    relative = Path("runs") / run_id
+    artifacts = root if confined_path(root, relative).is_dir() else confined_path(root, "artifacts")
+    return MetadataStore(db), artifacts, confined_path(artifacts, relative, must_exist=True)
+
+
+def _run_dataset(run_root: Path, store: MetadataStore, run: TrainingRun) -> DatasetManifest:
+    path = confined_path(run_root, "dataset-manifest.json")
+    dataset = (
+        DatasetManifest.model_validate_json(path.read_bytes())
+        if path.exists()
+        else store.get_dataset(run.dataset_fingerprint)
+    )
+    if dataset is None or dataset.fingerprint != run.dataset_fingerprint:
+        raise ValueError("run dataset identity mismatch")
+    if run.environment.get("dataset_manifest_hash", stable_digest(dataset)) != stable_digest(
+        dataset
+    ):
+        raise ValueError("run dataset manifest mismatch")
+    return dataset
+
+
 @app.command("resume")
 def resume(
     run_id: Annotated[str, typer.Argument()],
     root: Annotated[Path, typer.Option()] = Path(".tuneforge"),
 ) -> None:
-    store = MetadataStore(root / "tuneforge.sqlite3")
+    store, artifact_root, run_root = _recovery_paths(root, run_id)
     run_value = store.get_run(run_id)
-    checkpoints = store.list_checkpoints(run_id)
-    if run_value is None or not checkpoints:
-        raise typer.BadParameter("run or checkpoint not found", param_hint="run_id")
-    run_root = root / "runs" / run_id
+    if run_value is None:
+        raise typer.BadParameter("run not found", param_hint="run_id")
     model = ModelManifest.model_validate_json(
-        (run_root / "model-manifest.json").read_text(encoding="utf-8")
+        confined_path(run_root, "model-manifest.json", must_exist=True).read_bytes()
     )
     training_config = TrainingConfig.model_validate_json(
-        (run_root / "training-config.json").read_text(encoding="utf-8")
+        confined_path(run_root, "training-config.json", must_exist=True).read_bytes()
     )
     training_plan = TrainingPlan.model_validate_json(
-        (run_root / "training-plan.json").read_text(encoding="utf-8")
+        confined_path(run_root, "training-plan.json", must_exist=True).read_bytes()
     )
-    dataset = store.get_dataset(run_value.dataset_fingerprint)
-    if dataset is None:
-        raise typer.BadParameter("dataset metadata is missing", param_hint="run_id")
-    _, records = build_dataset_manifest(
-        dataset.source.path,
-        SplitConfig(
-            train_ratio=dataset.split.ratios["train"],
-            validation_ratio=dataset.split.ratios["validation"],
-            test_ratio=dataset.split.ratios["test"],
-            seed=dataset.split.seed,
-            algorithm=dataset.split.algorithm,
-        ),
-        license_metadata=dataset.source.license,
-        provenance=dataset.source.provenance,
-    )
+    dataset = _run_dataset(run_root, store, run_value)
+    # Verify source before replaying any interrupted checkpoint operation.
+    verified_split(dataset, "train")
+    recover_checkpoints(artifact_root, store, run_id)
+    checkpoints = store.list_checkpoints(run_id)
+    if not checkpoints:
+        raise typer.BadParameter("checkpoint not found", param_hint="run_id")
     outcome = DeterministicTrainerBackend().execute(
         training_plan,
         model,
         training_config,
-        records,
-        root,
+        dataset,
+        artifact_root,
         store,
         resume=checkpoints[-1],
     )
@@ -228,21 +245,23 @@ def evaluate(
     run_id: Annotated[str, typer.Argument()],
     root: Annotated[Path, typer.Option()] = Path(".tuneforge"),
 ) -> None:
-    store = MetadataStore(root / "tuneforge.sqlite3")
+    store, artifact_root, run_root = _recovery_paths(root, run_id)
     run_value = store.get_run(run_id)
-    checkpoints = store.list_checkpoints(run_id)
-    if run_value is None or not checkpoints:
-        raise typer.BadParameter("run or checkpoint not found", param_hint="run_id")
-    dataset = store.get_dataset(run_value.dataset_fingerprint)
-    if dataset is None:
-        raise typer.BadParameter("dataset metadata is missing", param_hint="run_id")
+    if run_value is None:
+        raise typer.BadParameter("run not found", param_hint="run_id")
+    dataset = _run_dataset(run_root, store, run_value)
+    records = verified_split(dataset, "test")
     config = TrainingConfig.model_validate_json(
-        (root / "runs" / run_id / "training-config.json").read_text(encoding="utf-8")
+        confined_path(run_root, "training-config.json", must_exist=True).read_bytes()
     )
-    _, records = build_dataset_manifest(dataset.source.path, SplitConfig(seed=dataset.split.seed))
-    checkpoint = checkpoints[-1]
-    model = load_checkpoint_model(checkpoint, checkpoint_directory(root, checkpoint), config)
-    loss = evaluate_language_model_loss(model, records[-1:], max_length=config.max_sequence_length)
+    recover_checkpoints(artifact_root, store, run_id)
+    checkpoints = store.list_checkpoints(run_id)
+    if not checkpoints:
+        raise typer.BadParameter("checkpoint not found", param_hint="run_id")
+    model = load_checkpoint_model(
+        checkpoints[-1], artifact_root, config, run_value.model_manifest_hash, store, run_id
+    )
+    loss = evaluate_language_model_loss(model, records, max_length=config.max_sequence_length)
     _echo({"run_id": run_id, "measured_loss": loss, "scope": "local tiny fixture"})
 
 
@@ -278,7 +297,8 @@ def evidence(
     run_id: Annotated[str, typer.Argument()],
     root: Annotated[Path, typer.Option()] = Path(".tuneforge"),
 ) -> None:
-    manifest = root / "runs" / run_id / "evidence" / "bundle-manifest.json"
+    validate_artifact_name(run_id)
+    manifest = confined_path(root, Path("runs") / run_id / "evidence" / "bundle-manifest.json")
     if not manifest.is_file():
         raise typer.BadParameter("evidence bundle not found", param_hint="run_id")
     _echo(json.loads(manifest.read_text(encoding="utf-8")))

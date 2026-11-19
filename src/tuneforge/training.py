@@ -7,7 +7,8 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,10 +19,17 @@ from torch.optim import AdamW
 from transformers import GPT2LMHeadModel
 
 from tuneforge import __version__
-from tuneforge.checkpoints import run_directory, save_checkpoint, validate_checkpoint
+from tuneforge.checkpoints import (
+    apply_retention,
+    run_directory,
+    save_checkpoint,
+    verified_checkpoint_files,
+)
+from tuneforge.dataset import verified_split
 from tuneforge.domain import (
     CanonicalTrainingRecord,
     CheckpointManifest,
+    DatasetManifest,
     LoRAConfig,
     ModelManifest,
     RunState,
@@ -50,9 +58,20 @@ class TrainingOutcome:
 class CancellationToken:
     def __init__(self) -> None:
         self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._closed = False
 
-    def cancel(self) -> None:
-        self._event.set()
+    def cancel(self) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            self._event.set()
+            return True
+
+    def finish(self) -> bool:
+        with self._lock:
+            self._closed = True
+            return self._event.is_set()
 
     @property
     def requested(self) -> bool:
@@ -66,7 +85,7 @@ class TrainerBackend(ABC):
         plan: TrainingPlan,
         model_manifest: ModelManifest,
         training_config: TrainingConfig,
-        records: list[CanonicalTrainingRecord],
+        records: list[CanonicalTrainingRecord] | DatasetManifest,
         artifact_root: Path,
         store: MetadataStore,
         *,
@@ -74,6 +93,7 @@ class TrainerBackend(ABC):
         cancellation: CancellationToken | None = None,
         resume: CheckpointManifest | None = None,
         loss_hook: LossHook | None = None,
+        on_started: Callable[[str], None] | None = None,
     ) -> TrainingOutcome:
         raise NotImplementedError
 
@@ -130,13 +150,21 @@ def _create_run(
 
 def load_checkpoint_model(
     checkpoint: CheckpointManifest,
-    directory: Path,
+    artifact_root: Path,
     config: TrainingConfig,
+    model_hash: str,
+    store: MetadataStore,
+    owner: str,
 ) -> nn.Module:
-    if checkpoint.method is TrainingMethod.FULL_FINE_TUNE:
-        return GPT2LMHeadModel.from_pretrained(directory, local_files_only=True)
-    base = create_tiny_model(seed=config.seed)
-    return PeftModel.from_pretrained(base, directory, is_trainable=True, local_files_only=True)
+    with verified_checkpoint_files(
+        artifact_root, checkpoint, model_hash, config, store, owner
+    ) as directory:
+        if checkpoint.method is TrainingMethod.FULL_FINE_TUNE:
+            return GPT2LMHeadModel.from_pretrained(
+                directory, local_files_only=True, use_safetensors=True
+            )
+        base = create_tiny_model(seed=config.seed)
+        return PeftModel.from_pretrained(base, directory, is_trainable=True, local_files_only=True)
 
 
 def verify_checkpoint_reload(
@@ -144,26 +172,46 @@ def verify_checkpoint_reload(
     checkpoint: CheckpointManifest,
     model_manifest: ModelManifest,
     config: TrainingConfig,
+    store: MetadataStore,
+    owner: str,
 ) -> bool:
-    directory = validate_checkpoint(artifact_root, checkpoint, model_manifest.manifest_hash, config)
-    reloaded = load_checkpoint_model(checkpoint, directory, config)
+    reloaded = load_checkpoint_model(
+        checkpoint, artifact_root, config, model_manifest.manifest_hash, store, owner
+    )
     reloaded.eval()
     with torch.no_grad():
         output = reloaded(input_ids=torch.tensor([[1, 4, 5, 2]], dtype=torch.long))
     return bool(torch.isfinite(output.logits).all())
 
 
+class WorkerBusyError(RuntimeError):
+    pass
+
+
+_worker_lock = threading.Lock()
+
+
+@contextmanager
+def local_worker() -> Iterator[None]:
+    """Model planning and execution both use the process-wide PyTorch random state."""
+    if not _worker_lock.acquire(blocking=False):
+        raise WorkerBusyError("another local training run is active")
+    try:
+        yield
+    finally:
+        _worker_lock.release()
+
+
 class DeterministicTrainerBackend(TrainerBackend):
     """Direct PyTorch backend used for real offline CPU validation and CI."""
 
-    _active_lock = threading.Lock()
-
+    @local_worker()
     def execute(
         self,
         plan: TrainingPlan,
         model_manifest: ModelManifest,
         training_config: TrainingConfig,
-        records: list[CanonicalTrainingRecord],
+        records: list[CanonicalTrainingRecord] | DatasetManifest,
         artifact_root: Path,
         store: MetadataStore,
         *,
@@ -171,17 +219,53 @@ class DeterministicTrainerBackend(TrainerBackend):
         cancellation: CancellationToken | None = None,
         resume: CheckpointManifest | None = None,
         loss_hook: LossHook | None = None,
+        on_started: Callable[[str], None] | None = None,
     ) -> TrainingOutcome:
-        if not records:
-            raise ValueError("training requires at least one normalized record")
+        registered = store.get_dataset(plan.dataset_fingerprint)
+        if registered is None:
+            raise ValueError("training requires a registered dataset")
+        if isinstance(records, DatasetManifest):
+            if resume is None and records != registered:
+                raise ValueError("registered dataset manifest mismatch")
+            if records.fingerprint != plan.dataset_fingerprint:
+                raise ValueError("run dataset fingerprint mismatch")
+            registered = records
+        train_records = verified_split(registered, "train")
+        if isinstance(records, list):
+            # Older callers may supply either all normalized records or the train partition.
+            supplied = {record.id: record for record in records}
+            if any(supplied.get(record.id) != record for record in train_records):
+                raise ValueError("supplied records differ from the registered training snapshot")
+        if (
+            plan.effective_batch_size != 1
+            or training_config.per_device_batch_size != 1
+            or training_config.gradient_accumulation != 1
+        ):
+            raise ValueError("CPU training requires batch size 1 and gradient accumulation 1")
+        budget = min(training_config.max_steps, len(train_records) * training_config.epochs)
+        if plan.training_config_hash != stable_digest(training_config):
+            raise ValueError("training plan configuration mismatch; replan this workflow")
+        if budget != plan.estimated_steps:
+            raise ValueError("training plan step budget mismatch")
+        if (
+            plan.model_manifest_hash != model_manifest.manifest_hash
+            or plan.method != model_manifest.training_method
+            or stable_digest(
+                {
+                    k: getattr(model_manifest, k)
+                    for k in ModelManifest.model_fields
+                    if k != "manifest_hash"
+                }
+            )
+            != model_manifest.manifest_hash
+        ):
+            raise ValueError("training plan model identity mismatch")
         if training_config.max_sequence_length > 32:
             raise ValueError("local tiny model supports a maximum sequence length of 32")
         plan_payload = plan.model_dump(exclude={"plan_hash"}, exclude_none=True)
         if plan.plan_hash != stable_digest(plan_payload):
             raise ValueError("training plan integrity check failed")
-        if not self._active_lock.acquire(blocking=False):
-            raise RuntimeError("another local training run is active")
-        run = _create_run(plan, training_config, store, experiment_id)
+        run: TrainingRun | None = None
         cancellation = cancellation or CancellationToken()
         checkpoints: list[CheckpointManifest] = []
         metrics: list[TrainingMetric] = []
@@ -190,16 +274,28 @@ class DeterministicTrainerBackend(TrainerBackend):
         try:
             set_reproducibility(training_config.seed)
             if resume is not None:
-                directory = validate_checkpoint(
-                    artifact_root, resume, model_manifest.manifest_hash, training_config
+                parent = store.get_run(resume.run_id)
+                if parent is None or parent.dataset_fingerprint != registered.fingerprint:
+                    raise ValueError("checkpoint dataset identity mismatch")
+                if parent.environment.get("plan_hash", plan.plan_hash) != plan.plan_hash:
+                    raise ValueError("checkpoint training plan mismatch")
+                if parent.environment.get(
+                    "dataset_manifest_hash", stable_digest(registered)
+                ) != stable_digest(registered):
+                    raise ValueError("checkpoint dataset manifest mismatch")
+                model = load_checkpoint_model(
+                    resume,
+                    artifact_root,
+                    training_config,
+                    model_manifest.manifest_hash,
+                    store,
+                    resume.run_id,
                 )
-                if resume.run_id != run.id:
-                    # A resumed execution is a new governed run linked by its checkpoint evidence.
-                    run.environment["resumed_from_run_id"] = resume.run_id
-                    run.environment["resumed_from_checkpoint_id"] = resume.checkpoint_id
-                    store.save_run(run)
-                model = load_checkpoint_model(resume, directory, training_config)
                 start_step = resume.step
+                if start_step > budget or (
+                    start_step == budget and parent.state is RunState.COMPLETED
+                ):
+                    raise ValueError("checkpoint has exhausted the total step budget")
             else:
                 model = create_tiny_model(seed=training_config.seed)
                 if plan.method is TrainingMethod.LORA:
@@ -220,16 +316,32 @@ class DeterministicTrainerBackend(TrainerBackend):
             ):
                 raise RuntimeError("LoRA did not reduce the trainable parameter count")
 
+            run = _create_run(plan, training_config, store, experiment_id)
+            run.environment["plan_hash"] = plan.plan_hash
+            run.environment["dataset_manifest_hash"] = stable_digest(registered)
+            if resume is not None:
+                run.environment["resumed_from_run_id"] = resume.run_id
+                run.environment["resumed_from_checkpoint_id"] = resume.checkpoint_id
+            store.save_run(run)
+            output_directory = run_directory(artifact_root, run.id)
+            for filename, payload in (
+                ("training-plan.json", plan),
+                ("model-manifest.json", model_manifest),
+                ("training-config.json", training_config),
+                ("dataset-manifest.json", registered),
+            ):
+                write_canonical_json(output_directory / filename, payload)
             optimizer = AdamW(
                 (parameter for parameter in model.parameters() if parameter.requires_grad),
                 lr=training_config.learning_rate,
                 weight_decay=training_config.weight_decay,
             )
             run = store.transition_run(run.id, RunState.RUNNING, updated_at=utc_now())
+            if on_started is not None:
+                on_started(run.id)
             model.train()
             final_step = start_step
-            steps_to_execute = min(plan.estimated_steps, training_config.max_steps)
-            for offset in range(1, steps_to_execute + 1):
+            for step in range(start_step + 1, budget + 1):
                 if cancellation.requested:
                     run = store.transition_run(
                         run.id,
@@ -237,11 +349,11 @@ class DeterministicTrainerBackend(TrainerBackend):
                         updated_at=utc_now(),
                         last_completed_step=final_step,
                     )
-                    return TrainingOutcome(run, metrics, checkpoints, report, False)
-                step = start_step + offset
-                final_step = step
+                    return TrainingOutcome(
+                        run, metrics, store.list_checkpoints(run.id), report, False
+                    )
                 started = time.perf_counter()
-                record = records[(step - 1) % len(records)]
+                record = train_records[(step - 1) % len(train_records)]
                 input_ids, labels = _batch(record, training_config.max_sequence_length)
                 optimizer.zero_grad(set_to_none=True)
                 output = model(input_ids=input_ids, labels=labels)
@@ -263,11 +375,12 @@ class DeterministicTrainerBackend(TrainerBackend):
                     training_config.gradient_clipping,
                 )
                 optimizer.step()
+                final_step = step
                 duration = time.perf_counter() - started
                 metric = TrainingMetric(
                     run_id=run.id,
                     step=step,
-                    epoch=step / max(1, steps_to_execute),
+                    epoch=step / len(train_records),
                     training_loss=float(loss.detach()),
                     learning_rate=float(optimizer.param_groups[0]["lr"]),
                     duration_seconds=duration,
@@ -276,9 +389,7 @@ class DeterministicTrainerBackend(TrainerBackend):
                 )
                 metrics.append(metric)
                 store.record_metric(metric)
-                should_save = (
-                    step % training_config.checkpoint_frequency == 0 or offset == steps_to_execute
-                )
+                should_save = step % training_config.checkpoint_frequency == 0 or step == budget
                 if should_save:
                     checkpoint = save_checkpoint(
                         model,
@@ -290,13 +401,39 @@ class DeterministicTrainerBackend(TrainerBackend):
                         model_manifest,
                         training_config,
                         {"training_loss": metric.training_loss},
+                        store=store,
                     )
                     checkpoints.append(checkpoint)
-                    store.record_checkpoint(checkpoint)
+                    apply_retention(artifact_root, store, run.id, training_config.keep_last_n)
+            if cancellation.finish():
+                run = store.transition_run(
+                    run.id,
+                    RunState.CANCELLED,
+                    updated_at=utc_now(),
+                    last_completed_step=final_step,
+                )
+                return TrainingOutcome(run, metrics, store.list_checkpoints(run.id), report, False)
+            if resume is not None and start_step == budget:
+                # Republish final weights when only finalization was interrupted.
+                checkpoints.append(
+                    save_checkpoint(
+                        model,
+                        artifact_root,
+                        run.id,
+                        start_step,
+                        resume.epoch,
+                        plan.method,
+                        model_manifest,
+                        training_config,
+                        resume.metrics,
+                        store=store,
+                    )
+                )
+            checkpoints = store.list_checkpoints(run.id)
             if not checkpoints:
                 raise RuntimeError("training completed without a checkpoint")
             reload_verified = verify_checkpoint_reload(
-                artifact_root, checkpoints[-1], model_manifest, training_config
+                artifact_root, checkpoints[-1], model_manifest, training_config, store, run.id
             )
             if not reload_verified:
                 raise RuntimeError("checkpoint reload verification failed")
@@ -306,36 +443,40 @@ class DeterministicTrainerBackend(TrainerBackend):
                 updated_at=utc_now(),
                 last_completed_step=final_step,
             )
+            finished_at = utc_now()
+            completed = run.model_copy(
+                update={"state": RunState.COMPLETED, "updated_at": finished_at}
+            )
+            write_canonical_json(output_directory / "metrics.json", metrics)
+            write_canonical_json(output_directory / "run.json", completed)
             run = store.transition_run(
                 run.id,
                 RunState.COMPLETED,
-                updated_at=utc_now(),
+                updated_at=finished_at,
                 last_completed_step=final_step,
             )
-            output_directory = run_directory(artifact_root, run.id)
-            write_canonical_json(output_directory / "run.json", run)
-            write_canonical_json(output_directory / "training-plan.json", plan)
-            write_canonical_json(output_directory / "model-manifest.json", model_manifest)
-            write_canonical_json(output_directory / "training-config.json", training_config)
-            write_canonical_json(output_directory / "metrics.json", metrics)
             return TrainingOutcome(run, metrics, checkpoints, report, reload_verified)
         except Exception as exc:
-            current = store.get_run(run.id)
+            current = store.get_run(run.id) if run is not None else None
             if current is not None and current.state not in {
                 RunState.COMPLETED,
                 RunState.FAILED,
                 RunState.CANCELLED,
             }:
+                if current.state is RunState.EVALUATING:
+                    (run_directory(artifact_root, current.id) / "run.json").unlink(missing_ok=True)
                 store.transition_run(
-                    run.id,
+                    current.id,
                     RunState.FAILED,
                     updated_at=utc_now(),
                     failure_category=type(exc).__name__,
-                    last_completed_step=len(metrics),
+                    last_completed_step=metrics[-1].step
+                    if metrics
+                    else (resume.step if resume else 0),
                 )
             raise
         finally:
-            self._active_lock.release()
+            cancellation.finish()
 
 
 class TransformersTrainerBackend(DeterministicTrainerBackend):

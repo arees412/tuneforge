@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 from tuneforge.domain import (
     DatasetManifest,
     LoRAConfig,
@@ -47,8 +45,14 @@ def build_training_plan(
     if model.training_method is TrainingMethod.LORA and not isinstance(adapter, LoRAConfig):
         raise ValueError("LoRA training requires a LoRA configuration")
     train_count = dataset.split.record_counts["train"]
-    batch = effective_batch_size(config, runtime.gpu_count or 1)
-    estimated = min(config.max_steps, max(1, math.ceil(train_count / batch) * config.epochs))
+    if not train_count:
+        raise ValueError("required train split is empty")
+    batch = effective_batch_size(config)
+    if batch != 1:
+        raise ValueError("CPU training requires batch size 1 and gradient accumulation 1")
+    if config.max_sequence_length > 32 or config.precision != "fp32":
+        raise ValueError("CPU training supports fp32 and at most 32 tokens")
+    estimated = min(config.max_steps, train_count * config.epochs)
     estimate = estimate_resources(
         model.parameter_count,
         trainable_parameters,
@@ -61,6 +65,7 @@ def build_training_plan(
         warnings.append("CPU execution selected; estimates do not imply accelerator availability.")
     payload = {
         "dataset_fingerprint": dataset.fingerprint,
+        "training_config_hash": stable_digest(config),
         "model_manifest_hash": model.manifest_hash,
         "method": model.training_method,
         "runtime": runtime,

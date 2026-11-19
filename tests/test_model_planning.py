@@ -88,12 +88,21 @@ def test_effective_batch_resource_estimate_and_plan(dataset_manifest: DatasetMan
     plan = build_training_plan(
         dataset_manifest,
         manifest,
-        config,
+        TrainingConfig(),
         detect_runtime(),
         trainable_parameters=int(parameter_report(adapted)["trainable_parameters"]),
         adapter=adapter,
     )
-    assert plan.effective_batch_size == 8
+    assert plan.effective_batch_size == 1
+    with pytest.raises(ValueError, match="batch size"):
+        build_training_plan(
+            dataset_manifest,
+            manifest,
+            config,
+            detect_runtime(),
+            trainable_parameters=256,
+            adapter=adapter,
+        )
     assert plan.plan_hash
     estimate = estimate_resources(1000, 100, TrainingMethod.LORA, 32, 2)
     assert estimate.estimated_checkpoint_bytes == 400

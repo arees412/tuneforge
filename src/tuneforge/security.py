@@ -24,11 +24,20 @@ def confined_path(root: Path, relative: str | Path, *, must_exist: bool = False)
     raw_path = str(relative)
     posix_path = PurePosixPath(raw_path)
     windows_path = PureWindowsPath(raw_path)
-    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+    if posix_path.is_absolute() or windows_path.root or windows_path.drive:
         raise PathSecurityError("absolute artifact paths are not allowed")
     if ".." in posix_path.parts or ".." in windows_path.parts:
         raise PathSecurityError("artifact path traversal is not allowed")
     candidate = Path(raw_path)
+    # Preserve the lexical path until every component has been checked.
+    for component in (root, *root.parents):
+        if component.is_symlink() or component.is_junction():
+            raise PathSecurityError("symlinked artifact root is not allowed")
+    current = root
+    for part in candidate.parts:
+        current = current / part
+        if current.is_symlink() or current.is_junction():
+            raise PathSecurityError("symlinked artifact path is not allowed")
     root_resolved = root.resolve()
     resolved = (root_resolved / candidate).resolve(strict=must_exist)
     try:

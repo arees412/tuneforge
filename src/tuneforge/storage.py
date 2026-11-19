@@ -66,6 +66,9 @@ class MetadataStore:
             "CREATE TABLE IF NOT EXISTS checkpoints "
             "(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step INTEGER NOT NULL, "
             "payload TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS checkpoint_ops "
+            "(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, operation TEXT NOT NULL, "
+            "payload TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS evaluations "
             "(id TEXT PRIMARY KEY, subject_id TEXT NOT NULL, payload TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS registry "

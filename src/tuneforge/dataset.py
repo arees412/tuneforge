@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import json
 import random
 import re
@@ -28,7 +30,7 @@ from tuneforge.domain import (
     TokenizationReport,
     ValidationIssue,
 )
-from tuneforge.utils import file_sha256, sha256_text, stable_digest
+from tuneforge.utils import sha256_text, stable_digest
 
 MAX_DATASET_BYTES = 10 * 1024 * 1024
 MAX_RECORDS = 100_000
@@ -65,28 +67,34 @@ def detect_format(path: Path) -> DatasetFormat:
 
 
 def read_records(path: Path, *, max_bytes: int = MAX_DATASET_BYTES) -> list[dict[str, Any]]:
-    resolved = path.resolve(strict=True)
-    if not resolved.is_file():
+    content = _source_bytes(path, max_bytes)
+    return _decode_records(content, detect_format(path))
+
+
+def _source_bytes(path: Path, max_bytes: int) -> bytes:
+    if not path.is_file():
         raise ValueError("dataset source must be a file")
-    if resolved.stat().st_size > max_bytes:
+    with path.open("rb") as stream:
+        content = stream.read(max_bytes + 1)
+    if len(content) > max_bytes:
         raise ValueError(f"dataset exceeds {max_bytes} byte limit")
-    fmt = detect_format(resolved)
+    return content
+
+
+def _decode_records(content: bytes, fmt: DatasetFormat) -> list[dict[str, Any]]:
     try:
+        text = content.decode("utf-8")
         if fmt is DatasetFormat.JSON:
-            data = json.loads(resolved.read_text(encoding="utf-8"))
+            data = json.loads(text)
             if isinstance(data, dict) and isinstance(data.get("records"), list):
                 data = data["records"]
             if not isinstance(data, list):
                 raise ValueError("JSON dataset must be an array or contain a records array")
             records = data
         elif fmt is DatasetFormat.JSONL:
-            records = [
-                json.loads(line)
-                for line in resolved.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            records = [json.loads(line) for line in text.splitlines() if line.strip()]
         else:
-            with resolved.open("r", encoding="utf-8", newline="") as stream:
+            with io.StringIO(text, newline="") as stream:
                 records = list(csv.DictReader(stream))
     except (UnicodeDecodeError, json.JSONDecodeError, csv.Error) as exc:
         raise ValueError(f"unable to decode dataset: {exc}") from exc
@@ -430,7 +438,9 @@ def build_dataset_manifest(
     license_metadata: LicenseMetadata | None = None,
     provenance: dict[str, str] | None = None,
 ) -> tuple[DatasetManifest, list[CanonicalTrainingRecord]]:
-    raw_records = read_records(path)
+    path = path.absolute()
+    content = _source_bytes(path, MAX_DATASET_BYTES)
+    raw_records = _decode_records(content, detect_format(path))
     validation = validate_records(raw_records)
     if not validation.valid or validation.schema_name is None:
         messages = "; ".join(issue.message for issue in validation.issues)
@@ -447,7 +457,7 @@ def build_dataset_manifest(
     source = DatasetSource(
         path=path,
         format=detect_format(path),
-        content_hash=file_sha256(path),
+        content_hash=hashlib.sha256(content).hexdigest(),
         record_count=len(raw_records),
         schema_name=validation.schema_name,
         license=license_value,
@@ -475,6 +485,38 @@ def build_dataset_manifest(
         quality=quality,
     )
     return manifest, clean_records
+
+
+def verified_split(
+    registered: DatasetManifest,
+    name: str,
+) -> list[CanonicalTrainingRecord]:
+    """Hash and decode the same bounded byte snapshot, then select registered IDs."""
+    split = registered.split
+    config = SplitConfig(
+        train_ratio=split.ratios["train"],
+        validation_ratio=split.ratios["validation"],
+        test_ratio=split.ratios["test"],
+        seed=split.seed,
+        algorithm=split.algorithm,
+    )
+    current, records = build_dataset_manifest(
+        registered.source.path,
+        config,
+        license_metadata=registered.source.license,
+        provenance=registered.source.provenance,
+    )
+    if (
+        current.fingerprint != registered.fingerprint
+        or current.split != split
+        or current.source.content_hash != registered.source.content_hash
+    ):
+        raise ValueError("registered dataset fingerprint or split membership changed")
+    ids = split.record_ids[name]
+    if not ids:
+        raise ValueError(f"required {name} split is empty")
+    by_id = {record.id: record for record in records}
+    return [by_id[record_id] for record_id in ids]
 
 
 def schema_counts(records: list[dict[str, Any]]) -> Counter[DatasetSchema]:

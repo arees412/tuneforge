@@ -166,6 +166,7 @@ def run_scenarios(root: Path) -> dict[str, Any]:
     failing_root = root / "non-finite"
     failing_store = MetadataStore(failing_root / "tuneforge.sqlite3")
     failure_manifest, failure_records = build_dataset_manifest(valid_path, SplitConfig(seed=101))
+    failing_store.register_dataset(failure_manifest.fingerprint, failure_manifest)
     failure_config = TrainingConfig(max_steps=1, max_sequence_length=16, checkpoint_frequency=1)
     base_model = create_tiny_model(seed=failure_config.seed)
     adapter = LoRAConfig(r=2, alpha=4)

@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tuneforge.checkpoints import apply_retention, checkpoint_directory
-from tuneforge.dataset import build_dataset_manifest
+from tuneforge.checkpoints import checkpoint_directory
+from tuneforge.dataset import build_dataset_manifest, verified_split
 from tuneforge.domain import (
     EvaluationResult,
     LicenseMetadata,
@@ -62,7 +62,7 @@ def run_demo(root: Path, *, method: TrainingMethod = TrainingMethod.LORA) -> dic
     dataset_path = root / "generated-demo-dataset.json"
     _write_fixture(dataset_path)
     store = MetadataStore(root / "tuneforge.sqlite3")
-    dataset, records = build_dataset_manifest(
+    dataset, _ = build_dataset_manifest(
         dataset_path,
         SplitConfig(train_ratio=0.8, validation_ratio=0.1, test_ratio=0.1, seed=17),
         license_metadata=LicenseMetadata(
@@ -98,13 +98,17 @@ def run_demo(root: Path, *, method: TrainingMethod = TrainingMethod.LORA) -> dic
         trainable_parameters=int(counts["trainable_parameters"]),
         adapter=adapter,
     )
+    if not dataset.split.record_ids["test"]:
+        raise ValueError("required test split is empty")
     outcome = DeterministicTrainerBackend().execute(
-        plan, model_manifest, config, records, root, store
+        plan, model_manifest, config, dataset, root, store
     )
     final_checkpoint = outcome.checkpoints[-1]
     final_directory = checkpoint_directory(root, final_checkpoint)
-    trained_model = load_checkpoint_model(final_checkpoint, final_directory, config)
-    evaluation_records = [records[-1]]
+    trained_model = load_checkpoint_model(
+        final_checkpoint, root, config, model_manifest.manifest_hash, store, outcome.run.id
+    )
+    evaluation_records = verified_split(dataset, "test")
     baseline_loss = evaluate_language_model_loss(
         create_tiny_model(seed=config.seed),
         evaluation_records,
@@ -118,7 +122,7 @@ def run_demo(root: Path, *, method: TrainingMethod = TrainingMethod.LORA) -> dic
         suite_version="1",
         subject_id="local-random-baseline",
         metrics={"loss": baseline_loss},
-        case_results={evaluation_records[0].id: baseline_loss},
+        case_results={"test_split_mean": baseline_loss},
         passed=True,
         warnings=["Tiny fixture loss is a pipeline check, not a general benchmark."],
     )
@@ -127,7 +131,7 @@ def run_demo(root: Path, *, method: TrainingMethod = TrainingMethod.LORA) -> dic
         suite_version="1",
         subject_id=outcome.run.id,
         metrics={"loss": candidate_loss},
-        case_results={evaluation_records[0].id: candidate_loss},
+        case_results={"test_split_mean": candidate_loss},
         passed=True,
         warnings=["Tiny fixture loss is a pipeline check, not a general benchmark."],
     )
@@ -155,9 +159,6 @@ def run_demo(root: Path, *, method: TrainingMethod = TrainingMethod.LORA) -> dic
         {"evidence_hash": evidence.evidence_hash, "archive_sha256": archive_hash},
     )
     store.record_audit(event)
-    removed = apply_retention(root, outcome.checkpoints, config.keep_last_n)
-    for checkpoint in removed:
-        store.delete_checkpoint_metadata(checkpoint.checkpoint_id)
     result: dict[str, Any] = {
         "run_id": outcome.run.id,
         "state": outcome.run.state.value,

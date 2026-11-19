@@ -127,6 +127,7 @@ def test_cancellation_before_first_step(tmp_path: Path, dataset_path: Path) -> N
         trainable_parameters=int(parameter_report(model)["trainable_parameters"]),
     )
     store = MetadataStore(tmp_path / "meta.sqlite3")
+    store.register_dataset(dataset.fingerprint, dataset)
     token = CancellationToken()
     token.cancel()
     outcome = DeterministicTrainerBackend().execute(
@@ -143,11 +144,11 @@ def test_checkpoint_integrity_retention_and_evidence(tmp_path: Path, dataset_pat
     )
     with pytest.raises(ValueError, match="model manifest"):
         validate_checkpoint(tmp_path, outcome.checkpoints[-1], "wrong", config)
-    removed = apply_retention(tmp_path, outcome.checkpoints, keep_last_n=1)
-    assert len(removed) == 1
+    apply_retention(tmp_path, store, outcome.run.id, keep_last_n=1)
+    assert store.list_checkpoints(outcome.run.id) == outcome.checkpoints
+    assert len(outcome.checkpoints) == 1
     assert checkpoint_directory(tmp_path, outcome.checkpoints[-1]).is_dir()
-    with pytest.raises(FileNotFoundError):
-        checkpoint_directory(tmp_path, removed[0])
+    assert not (tmp_path / "runs" / outcome.run.id / "checkpoints" / "step-000001").exists()
     evaluation = EvaluationResult(
         suite_id="suite",
         suite_version="1",
@@ -172,3 +173,38 @@ def test_checkpoint_integrity_retention_and_evidence(tmp_path: Path, dataset_pat
     assert "no performance claim" not in card
     archive, second_hash = write_evidence_bundle(tmp_path, outcome.run, evidence, report, card)
     assert first_hash == second_hash == file_sha256(archive)
+
+
+@pytest.mark.parametrize("method", [TrainingMethod.FULL_FINE_TUNE, TrainingMethod.LORA])
+def test_saved_weights_match_real_final_forward(tmp_path, dataset_path, monkeypatch, method):
+    from tuneforge import training
+
+    observed = []
+    save = training.save_checkpoint
+    tokens = torch.tensor([[1, 4, 5, 2]], dtype=torch.long)
+
+    def observe(model, *args, **kwargs):
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            observed.append(model(input_ids=tokens).logits.clone())
+        model.train(was_training)
+        return save(model, *args, **kwargs)
+
+    monkeypatch.setattr(training, "save_checkpoint", observe)
+    _, config, manifest, _, store, outcome = execute(tmp_path, dataset_path, method)
+    restored = training.load_checkpoint_model(
+        outcome.checkpoints[-1], tmp_path, config, manifest.manifest_hash, store, outcome.run.id
+    )
+    initial = create_tiny_model(seed=config.seed)
+    if method is TrainingMethod.LORA:
+        initial = apply_lora(initial, manifest.adapter_configuration)
+    baseline = dict(initial.named_parameters())
+    changed = {
+        name for name, p in restored.named_parameters() if not torch.equal(p, baseline[name])
+    }
+    trainable = {name for name, p in initial.named_parameters() if p.requires_grad}
+    assert changed and not (changed - trainable)
+    restored.eval()
+    with torch.no_grad():
+        assert torch.equal(restored(input_ids=tokens).logits, observed[-1])
