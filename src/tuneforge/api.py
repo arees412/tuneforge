@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -34,7 +35,12 @@ from tuneforge.registry import ModelRegistry
 from tuneforge.runtime import detect_runtime
 from tuneforge.security import PathSecurityError, confined_path
 from tuneforge.storage import MetadataStore
-from tuneforge.training import CancellationToken, DeterministicTrainerBackend
+from tuneforge.training import (
+    CancellationToken,
+    DeterministicTrainerBackend,
+    WorkerBusyError,
+    local_worker,
+)
 from tuneforge.utils import file_sha256, stable_digest
 
 
@@ -79,6 +85,7 @@ class TuneForgeService:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.store = MetadataStore(root / "tuneforge.sqlite3")
         self.registry = ModelRegistry(self.store)
+        self.active_lock = Lock()
         self.cancellations: dict[str, CancellationToken] = {}
 
     def dataset_path(self, value: str) -> Path:
@@ -88,6 +95,13 @@ class TuneForgeService:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def plan(self, request: PlanRequest):  # type: ignore[no-untyped-def]
+        try:
+            with local_worker():
+                return self._plan(request)
+        except WorkerBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _plan(self, request: PlanRequest):  # type: ignore[no-untyped-def]
         dataset = self.store.get_dataset(request.dataset_id)
         if dataset is None:
             raise HTTPException(status_code=404, detail="dataset not found")
@@ -100,12 +114,14 @@ class TuneForgeService:
             else None
         )
         model_manifest = build_model_manifest(tiny_model_spec(base), request.method, adapter)
-        trainable = int(
-            parameter_report(
-                apply_lora(base, request.lora) if request.method is TrainingMethod.LORA else base
-            )["trainable_parameters"]
-        )
         try:
+            trainable = int(
+                parameter_report(
+                    apply_lora(base, request.lora)
+                    if request.method is TrainingMethod.LORA
+                    else base
+                )["trainable_parameters"]
+            )
             plan = build_training_plan(
                 dataset,
                 model_manifest,
@@ -166,31 +182,47 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/runs")
     def run(request: RunRequest):  # type: ignore[no-untyped-def]
         dataset, model_manifest, training_plan = service.plan(request)
-        _, records = build_dataset_manifest(
-            dataset.source.path,
-            SplitConfig(
-                train_ratio=dataset.split.ratios["train"],
-                validation_ratio=dataset.split.ratios["validation"],
-                test_ratio=dataset.split.ratios["test"],
-                seed=dataset.split.seed,
-                algorithm=dataset.split.algorithm,
-            ),
-            license_metadata=dataset.source.license,
-            provenance=dataset.source.provenance,
-        )
-        outcome = DeterministicTrainerBackend().execute(
-            training_plan,
-            model_manifest,
-            request.training,
-            records,
-            service.artifact_root,
-            service.store,
-        )
+        token = CancellationToken()
+        active_id = None
+
+        def register(identifier: str) -> None:
+            nonlocal active_id
+            with service.active_lock:
+                active_id = identifier
+                service.cancellations[identifier] = token
+
+        try:
+            # Recheck confinement when reopening a previously registered API path.
+            relative = dataset.source.path.relative_to(service.dataset_root.absolute())
+            confined_path(service.dataset_root, relative, must_exist=True)
+            outcome = DeterministicTrainerBackend().execute(
+                training_plan,
+                model_manifest,
+                request.training,
+                dataset,
+                service.artifact_root,
+                service.store,
+                cancellation=token,
+                on_started=register,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except WorkerBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            with service.active_lock:
+                if active_id is not None:
+                    service.cancellations.pop(active_id, None)
         return {
             "run": outcome.run,
             "parameters": outcome.parameter_report,
             "adapter_reload_verified": outcome.adapter_reload_verified,
         }
+
+    @app.get("/runs/active")
+    def active_runs() -> list[str]:
+        with service.active_lock:
+            return list(service.cancellations)
 
     @app.get("/runs/{identifier}")
     def get_run(identifier: str):  # type: ignore[no-untyped-def]
@@ -201,10 +233,11 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.post("/runs/{identifier}/cancel")
     def cancel_run(identifier: str) -> dict[str, str]:
-        token = service.cancellations.get(identifier)
-        if token is None:
+        with service.active_lock:
+            token = service.cancellations.get(identifier)
+            accepted = token is not None and token.cancel()
+        if not accepted:
             raise HTTPException(status_code=409, detail="run is not active on this worker")
-        token.cancel()
         return {"status": "cancellation_requested"}
 
     @app.get("/runs/{identifier}/metrics")
