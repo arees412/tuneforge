@@ -15,6 +15,7 @@ from tuneforge.domain import (
     EvaluationResult,
     Experiment,
     ModelRegistryEntry,
+    RegistryStatus,
     RunState,
     TrainingMetric,
     TrainingRun,
@@ -173,12 +174,16 @@ class MetadataStore:
 
     def save_evaluation(self, identifier: str, result: EvaluationResult) -> None:
         with self.connect() as connection:
+            payload = canonical_json(result)
             connection.execute(
-                "INSERT INTO evaluations(id, subject_id, payload) VALUES (?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET subject_id=excluded.subject_id, "
-                "payload=excluded.payload",
-                (identifier, result.subject_id, canonical_json(result)),
+                "INSERT OR IGNORE INTO evaluations(id, subject_id, payload) VALUES (?, ?, ?)",
+                (identifier, result.subject_id, payload),
             )
+            row = connection.execute(
+                "SELECT payload FROM evaluations WHERE id=?", (identifier,)
+            ).fetchone()
+            if row["payload"] != payload:
+                raise ValueError("existing evaluation evidence is immutable")
 
     def get_evaluation(self, identifier: str) -> EvaluationResult | None:
         return self._get("evaluations", identifier, EvaluationResult)
@@ -189,6 +194,21 @@ class MetadataStore:
                 "INSERT INTO registry(id, status, payload) VALUES (?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET status=excluded.status, payload=excluded.payload",
                 (entry.id, entry.status.value, canonical_json(entry)),
+            )
+
+    def commit_registry_transition(
+        self, entry: ModelRegistryEntry, previous: RegistryStatus, event: AuditEvent
+    ) -> None:
+        with self.connect() as connection:
+            updated = connection.execute(
+                "UPDATE registry SET status=?, payload=? WHERE id=? AND status=?",
+                (entry.status.value, canonical_json(entry), entry.id, previous.value),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("registry state changed during transition")
+            connection.execute(
+                "INSERT INTO audit_events(id, subject_id, created_at, payload) VALUES (?,?,?,?)",
+                (event.id, event.subject_id, event.created_at.isoformat(), canonical_json(event)),
             )
 
     def get_registry_entry(self, identifier: str) -> ModelRegistryEntry | None:

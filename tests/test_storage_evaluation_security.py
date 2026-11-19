@@ -145,3 +145,31 @@ def test_path_confinement_artifact_names_and_publisher_boundary(tmp_path: Path) 
 
 def test_stable_digest_order_independent() -> None:
     assert stable_digest({"a": 1, "b": 2}) == stable_digest({"b": 2, "a": 1})
+
+
+def test_registry_binds_immutable_evidence_and_audits_transitions(tmp_path: Path) -> None:
+    store = MetadataStore(tmp_path / "registry.sqlite3")
+    registry = ModelRegistry(store)
+    first = registry.register("run-a", "adapter", "first")
+    second = registry.register("run-b", "adapter", "second")
+    for entry in [first, second]:
+        result = EvaluationResult(
+            suite_id="fixture",
+            suite_version="1",
+            subject_id=entry.run_id,
+            metrics={"score": 0.0},
+            case_results={"case": 0.0},
+            passed=False,
+        )
+        store.save_evaluation(entry.id, result)
+        evaluated = registry.transition(entry.id, RegistryStatus.EVALUATED, evaluation_id=entry.id)
+        assert evaluated.evaluation_id == entry.id
+    with pytest.raises(ValueError, match="subject"):
+        registry.transition(first.id, RegistryStatus.APPROVED, evaluation_id=second.id)
+    with pytest.raises(ValueError, match="immutable"):
+        store.save_evaluation(first.id, result)
+    approved = registry.transition(first.id, RegistryStatus.APPROVED)
+    assert approved.evaluation_id == first.id
+    assert store.get_registry_entry(second.id).status is RegistryStatus.EVALUATED
+    assert [e.details["to"] for e in store.list_audit(first.id)] == ["evaluated", "approved"]
+    assert len(store.list_audit(second.id)) == 1

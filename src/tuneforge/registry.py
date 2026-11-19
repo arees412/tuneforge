@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from tuneforge.domain import ModelRegistryEntry, RegistryStatus
+from tuneforge.domain import AuditEvent, ModelRegistryEntry, RegistryStatus
 from tuneforge.storage import MetadataStore
 from tuneforge.utils import utc_now
 
@@ -55,12 +55,27 @@ class ModelRegistry:
         evidence_id = evaluation_id or entry.evaluation_id
         if target in {RegistryStatus.EVALUATED, RegistryStatus.APPROVED} and not evidence_id:
             raise ValueError("evaluation evidence is required for this registry transition")
-        if evidence_id and self.store.get_evaluation(evidence_id) is None:
-            raise ValueError("evaluation evidence does not exist")
+        if evidence_id:
+            evidence = self.store.get_evaluation(evidence_id)
+            if evidence is None:
+                raise ValueError("evaluation evidence does not exist")
+            if target in {
+                RegistryStatus.EVALUATED,
+                RegistryStatus.APPROVED,
+            } and evidence.subject_id not in {entry.id, entry.run_id}:
+                raise ValueError("evaluation subject does not match this candidate or run")
+        previous = entry.status
         entry.status = target
         entry.evaluation_id = evidence_id
         entry.updated_at = utc_now()
-        self.store.save_registry_entry(entry)
+        event = AuditEvent(
+            id=f"audit-{uuid.uuid4().hex}",
+            event_type="registry.transition",
+            subject_id=entry.id,
+            created_at=entry.updated_at,
+            details={"from": previous.value, "to": target.value, "evaluation_id": evidence_id},
+        )
+        self.store.commit_registry_transition(entry, previous, event)
         return entry
 
     def list(self) -> list[ModelRegistryEntry]:
