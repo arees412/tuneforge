@@ -31,7 +31,7 @@ uv run tuneforge demo --root .tuneforge-demo
 uv run tuneforge eval --root .tuneforge-eval
 ```
 
-The demo generates its own ten-record fixture, constructs a tiny transformer locally, performs three real training steps, saves and reloads a LoRA adapter, measures held-out loss, and writes an evidence bundle. Generated data and artifacts are ignored by Git.
+The demo generates its own ten-record fixture, constructs a tiny transformer locally, performs three real training steps, saves and reloads a LoRA adapter, measures mean loss on the registered test split, and writes an evidence bundle. Generated data and artifacts are ignored by Git.
 
 To run the service:
 
@@ -39,7 +39,7 @@ To run the service:
 uv run uvicorn tuneforge.api:app --host 127.0.0.1 --port 8000
 ```
 
-API datasets are confined to `.tuneforge/datasets`. Copy a local input there before registration. The CLI accepts explicit local paths.
+API datasets are confined to `.tuneforge/datasets`. Copy a local input there before registration. The CLI accepts explicit local paths. Training and evaluation verify the current source bytes against the registration. Optimizer updates use the train split exclusively. Each CPU update consumes one example. Resume loads verified weights within the original total step budget. See [recovery and retention](docs/checkpoints.md) and [worker-local cancellation](docs/api.md).
 
 ## Workflow configuration
 

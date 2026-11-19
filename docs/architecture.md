@@ -27,6 +27,8 @@ Core modules:
 - `evaluation.py`, `registry.py`, `evidence.py`: deterministic evaluation, evidence-gated registry, and exports.
 - `api.py`, `cli.py`: local interfaces over the same domain functions.
 
+The trainer verifies the registered byte snapshot and selects train IDs before it creates a run. Evaluation selects test IDs from the verified registration. A SQLite journal coordinates checkpoint publication and retirement with the filesystem. Registry transitions bind evidence to the candidate or its run and append an audit event in the same transaction.
+
 The `TrainerBackend` contract leaves room for a future documented Transformers or TRL integration. v0.1 uses the governed direct PyTorch backend so CI proves every optimizer step without network access.
 
 VLM modality types and schema boundaries are represented, but no image processor or multimodal trainer is supplied. This boundary prevents a configuration abstraction from being misrepresented as working VLM training.

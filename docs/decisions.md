@@ -23,3 +23,7 @@ SQLite stores queryable metadata while canonical JSON and safetensors hold porta
 ## ADR-006: Safe serialization boundary
 
 Weights and adapters use safetensors. Optimizer pickle loading, model merging, remote code, automated Hub publication, distributed scheduling, and full VLM training are intentionally unsupported in v0.1.
+
+## Governed execution and recovery
+
+The CPU backend accepts one example per optimizer step. Runs revalidate a single byte snapshot against the registered fingerprint. A weights-only restart uses the remaining original step budget. Checkpoint publication and retirement use replayable SQLite intents. Registry transitions bind evidence identity and commit audit history atomically.

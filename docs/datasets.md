@@ -15,6 +15,8 @@ Fingerprint inputs include the source SHA-256, normalization and schema versions
 
 The default stable-hash split uses each canonical record ID plus a seed. A seeded-random strategy is also available. The manifest records ratios, seed, algorithm, IDs, counts, and split digest. Leakage checks detect cross-split identical records, prompts, and targets. A training plan is rejected when leakage remains.
 
+Training revalidates the registered snapshot and selects its train IDs. CLI model evaluation and the demo score the persisted test IDs. Each operation rejects an empty required split. Record IDs are inspected by regression tests without logging samples during training.
+
 The quality report includes valid/invalid counts, duplicates, empty targets, lengths, violations, leakage, sensitivity warnings, and license-metadata availability. The built-in whitespace tokenizer provides offline deterministic token-count analysis; it is not presented as the production model tokenizer.
 
 Dataset license fields are operator-supplied metadata. `unknown` is the safe default. TuneForge does not infer licensing rights from a source location and does not provide legal advice.
