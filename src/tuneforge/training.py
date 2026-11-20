@@ -32,6 +32,7 @@ from tuneforge.domain import (
     DatasetManifest,
     LoRAConfig,
     ModelManifest,
+    RecordedTrainingConfig,
     RunState,
     TrainingConfig,
     TrainingMethod,
@@ -40,6 +41,7 @@ from tuneforge.domain import (
     TrainingRun,
 )
 from tuneforge.modeling import apply_lora, create_tiny_model, parameter_report
+from tuneforge.planning import checkpoint_strategy, validate_cpu_config
 from tuneforge.storage import MetadataStore
 from tuneforge.utils import stable_digest, utc_now, write_canonical_json
 
@@ -151,7 +153,7 @@ def _create_run(
 def load_checkpoint_model(
     checkpoint: CheckpointManifest,
     artifact_root: Path,
-    config: TrainingConfig,
+    config: RecordedTrainingConfig,
     model_hash: str,
     store: MetadataStore,
     owner: str,
@@ -221,6 +223,11 @@ class DeterministicTrainerBackend(TrainerBackend):
         loss_hook: LossHook | None = None,
         on_started: Callable[[str], None] | None = None,
     ) -> TrainingOutcome:
+        training_config = validate_cpu_config(training_config)
+        if plan.checkpoint_strategy != checkpoint_strategy(training_config):
+            raise ValueError("training plan checkpoint strategy differs from configuration")
+        if plan.evaluation_plan != {"strategy": training_config.evaluation_strategy}:
+            raise ValueError("training plan evaluation strategy differs from configuration")
         registered = store.get_dataset(plan.dataset_fingerprint)
         if registered is None:
             raise ValueError("training requires a registered dataset")
@@ -236,12 +243,8 @@ class DeterministicTrainerBackend(TrainerBackend):
             supplied = {record.id: record for record in records}
             if any(supplied.get(record.id) != record for record in train_records):
                 raise ValueError("supplied records differ from the registered training snapshot")
-        if (
-            plan.effective_batch_size != 1
-            or training_config.per_device_batch_size != 1
-            or training_config.gradient_accumulation != 1
-        ):
-            raise ValueError("CPU training requires batch size 1 and gradient accumulation 1")
+        if plan.effective_batch_size != 1:
+            raise ValueError("CPU training plan requires effective batch size 1")
         budget = min(training_config.max_steps, len(train_records) * training_config.epochs)
         if plan.training_config_hash != stable_digest(training_config):
             raise ValueError("training plan configuration mismatch; replan this workflow")
@@ -260,8 +263,6 @@ class DeterministicTrainerBackend(TrainerBackend):
             != model_manifest.manifest_hash
         ):
             raise ValueError("training plan model identity mismatch")
-        if training_config.max_sequence_length > 32:
-            raise ValueError("local tiny model supports a maximum sequence length of 32")
         plan_payload = plan.model_dump(exclude={"plan_hash"}, exclude_none=True)
         if plan.plan_hash != stable_digest(plan_payload):
             raise ValueError("training plan integrity check failed")

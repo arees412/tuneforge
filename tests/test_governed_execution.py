@@ -327,6 +327,8 @@ def test_public_cli_recovers_after_worker_process_exit(workflow, updates):
     import sys
 
     path, config = workflow
+    config["training"].update(learning_rate=0.003, scheduler="constant", evaluation_strategy="none")
+    write_canonical_json(path, config)
     # Exit only the fixture subprocess, after its first durable checkpoint.
     program = """
 import os, sys
@@ -357,3 +359,5 @@ app()
     manifest = store.get_dataset(child["dataset_fingerprint"])
     assert updates == manifest.split.record_ids["train"][1:4]
     assert [m.step for m in store.list_metrics(child["id"])] == [2, 3, 4]
+    combined = store.list_metrics(parent) + store.list_metrics(child["id"])
+    assert [(m.step, m.learning_rate) for m in combined] == [(i, 0.003) for i in range(1, 5)]

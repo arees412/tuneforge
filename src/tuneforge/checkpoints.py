@@ -13,7 +13,13 @@ from shutil import copyfile
 
 from torch import nn
 
-from tuneforge.domain import CheckpointManifest, ModelManifest, TrainingConfig, TrainingMethod
+from tuneforge.domain import (
+    CheckpointManifest,
+    ModelManifest,
+    RecordedTrainingConfig,
+    TrainingConfig,
+    TrainingMethod,
+)
 from tuneforge.security import confined_path, validate_artifact_name
 from tuneforge.storage import MetadataStore
 from tuneforge.utils import (
@@ -88,7 +94,7 @@ def validate_checkpoint(
     artifact_root: Path,
     manifest: CheckpointManifest,
     model_manifest_hash: str,
-    training_config: TrainingConfig,
+    training_config: RecordedTrainingConfig,
 ) -> Path:
     if manifest.model_manifest_hash != model_manifest_hash:
         raise ValueError("checkpoint model manifest does not match the requested run")
@@ -121,7 +127,7 @@ def verified_checkpoint_files(
     root: Path,
     checkpoint: CheckpointManifest,
     model_hash: str,
-    config: TrainingConfig,
+    config: RecordedTrainingConfig,
     store: MetadataStore,
     owner: str,
 ) -> Iterator[Path]:

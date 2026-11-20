@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from math import isfinite
 from pathlib import Path
 from threading import Lock
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from tuneforge.dataset import (
@@ -139,6 +143,14 @@ def create_app(root: Path | None = None) -> FastAPI:
     service = TuneForgeService(root or Path(".tuneforge"))
     app = FastAPI(title="TuneForge", version="0.1.0")
     app.state.service = service
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        # JSON numbers such as 1e309 overflow to infinity in the echoed validation input.
+        detail = jsonable_encoder(
+            exc.errors(), custom_encoder={float: lambda n: n if isfinite(n) else str(n)}
+        )
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     @app.get("/health")
     def health() -> dict[str, str]:

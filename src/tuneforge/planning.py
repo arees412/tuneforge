@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from tuneforge.domain import (
     DatasetManifest,
     LoRAConfig,
@@ -12,12 +14,34 @@ from tuneforge.domain import (
     TrainingMethod,
     TrainingPlan,
 )
-from tuneforge.runtime import estimate_resources, require_qlora_capability, validate_precision
+from tuneforge.runtime import estimate_resources, require_qlora_capability
 from tuneforge.utils import stable_digest
 
 
 def effective_batch_size(config: TrainingConfig, device_count: int = 1) -> int:
     return config.per_device_batch_size * config.gradient_accumulation * max(1, device_count)
+
+
+def validate_cpu_config(config: TrainingConfig) -> TrainingConfig:
+    # Revalidate even model_copy(update=...) and take a private snapshot for execution.
+    config = TrainingConfig.model_validate(config)
+    if config.per_device_batch_size != 1 or config.gradient_accumulation != 1:
+        raise ValueError("CPU training requires batch size 1 and gradient accumulation 1")
+    if config.precision != "fp32" or config.max_sequence_length > 32:
+        raise ValueError("CPU training requires precision='fp32' and max_sequence_length <= 32")
+    if torch.get_default_dtype() != torch.float32 or torch.is_autocast_enabled("cpu"):
+        raise ValueError(
+            "CPU training requires PyTorch's FP32 default dtype with CPU autocast disabled"
+        )
+    return config
+
+
+def checkpoint_strategy(config: TrainingConfig) -> dict[str, str | int]:
+    return {
+        "save_strategy": config.save_strategy,
+        "frequency": config.checkpoint_frequency,
+        "keep_last_n": config.keep_last_n,
+    }
 
 
 def build_training_plan(
@@ -29,6 +53,7 @@ def build_training_plan(
     trainable_parameters: int,
     adapter: LoRAConfig | QLoRAConfig | None = None,
 ) -> TrainingPlan:
+    config = validate_cpu_config(config)
     if dataset.quality.valid_records == 0:
         raise ValueError("training plan requires at least one valid record")
     if dataset.leakage_findings:
@@ -37,7 +62,6 @@ def build_training_plan(
         raise ValueError("model parameter count is required for execution planning")
     if trainable_parameters <= 0:
         raise ValueError("training plan has zero trainable parameters")
-    validate_precision(config.precision, runtime)
     if model.training_method is TrainingMethod.QLORA:
         require_qlora_capability(runtime)
         if not isinstance(adapter, QLoRAConfig):
@@ -48,10 +72,6 @@ def build_training_plan(
     if not train_count:
         raise ValueError("required train split is empty")
     batch = effective_batch_size(config)
-    if batch != 1:
-        raise ValueError("CPU training requires batch size 1 and gradient accumulation 1")
-    if config.max_sequence_length > 32 or config.precision != "fp32":
-        raise ValueError("CPU training supports fp32 and at most 32 tokens")
     estimated = min(config.max_steps, train_count * config.epochs)
     estimate = estimate_resources(
         model.parameter_count,
@@ -72,11 +92,7 @@ def build_training_plan(
         "effective_batch_size": batch,
         "estimated_steps": estimated,
         "adapter_configuration": adapter,
-        "checkpoint_strategy": {
-            "save_strategy": config.save_strategy,
-            "frequency": config.checkpoint_frequency,
-            "keep_last_n": config.keep_last_n,
-        },
+        "checkpoint_strategy": checkpoint_strategy(config),
         "evaluation_plan": {"strategy": config.evaluation_strategy},
         "warnings": warnings,
         "resource_estimate": estimate,

@@ -241,7 +241,9 @@ class ModelManifest(StrictModel):
     manifest_hash: str
 
 
-class TrainingConfig(StrictModel):
+class RecordedTrainingConfig(StrictModel):
+    """Historical settings used to verify and evaluate already-written checkpoints."""
+
     epochs: int = Field(default=1, gt=0, le=100)
     max_steps: int = Field(default=4, gt=0, le=100_000)
     learning_rate: float = Field(default=5e-4, gt=0, le=1)
@@ -256,11 +258,27 @@ class TrainingConfig(StrictModel):
     gradient_clipping: float = Field(default=1.0, gt=0)
     seed: int = 42
     logging_steps: int = Field(default=1, gt=0)
-    evaluation_strategy: Literal["none", "steps", "epoch"] = "steps"
+    evaluation_strategy: Literal["none", "steps", "epoch"]
     save_strategy: Literal["steps", "epoch"] = "steps"
     checkpoint_frequency: int = Field(default=2, gt=0)
     early_stopping_patience: int | None = Field(default=None, gt=0)
     keep_last_n: int = Field(default=2, gt=0, le=100)
+
+
+class TrainingConfig(RecordedTrainingConfig):
+    """Settings accepted for new plans, training, and weights-only restarts."""
+
+    model_config = ConfigDict(revalidate_instances="always")
+
+    warmup_ratio: float = Field(default=0.0, strict=True, ge=0, le=0)
+    scheduler: Literal["constant"] = "constant"
+    gradient_clipping: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    # torch.manual_seed accepts signed 64-bit negatives and unsigned 64-bit positives.
+    seed: int = Field(default=42, ge=-(2**63), lt=2**64)
+    logging_steps: int = Field(default=1, strict=True, ge=1, le=1)
+    evaluation_strategy: Literal["none"] = "none"
+    save_strategy: Literal["steps"] = "steps"
+    early_stopping_patience: None = None
 
 
 class RuntimeCapabilities(StrictModel):

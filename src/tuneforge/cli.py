@@ -25,6 +25,7 @@ from tuneforge.domain import (
     LoRAConfig,
     ModelManifest,
     QLoRAConfig,
+    RecordedTrainingConfig,
     SplitConfig,
     TrainingConfig,
     TrainingMethod,
@@ -39,7 +40,7 @@ from tuneforge.modeling import (
     parameter_report,
     tiny_model_spec,
 )
-from tuneforge.planning import build_training_plan
+from tuneforge.planning import build_training_plan, validate_cpu_config
 from tuneforge.runtime import detect_runtime
 from tuneforge.scenarios import run_scenarios
 from tuneforge.security import confined_path, validate_artifact_name
@@ -76,7 +77,9 @@ def _echo(value: Any) -> None:
 
 def _load_workflow(path: Path) -> WorkflowConfig:
     try:
-        return WorkflowConfig.model_validate_json(path.read_text(encoding="utf-8"))
+        workflow = WorkflowConfig.model_validate_json(path.read_text(encoding="utf-8"))
+        validate_cpu_config(workflow.training)
+        return workflow
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc), param_hint="config") from exc
 
@@ -215,9 +218,14 @@ def resume(
     model = ModelManifest.model_validate_json(
         confined_path(run_root, "model-manifest.json", must_exist=True).read_bytes()
     )
-    training_config = TrainingConfig.model_validate_json(
-        confined_path(run_root, "training-config.json", must_exist=True).read_bytes()
-    )
+    config_path = confined_path(run_root, "training-config.json", must_exist=True)
+    try:
+        training_config = TrainingConfig.model_validate_json(config_path.read_bytes())
+        if "evaluation_strategy" not in training_config.model_fields_set:
+            raise ValueError("recorded configuration is missing evaluation_strategy")
+        validate_cpu_config(training_config)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="recorded training configuration") from exc
     training_plan = TrainingPlan.model_validate_json(
         confined_path(run_root, "training-plan.json", must_exist=True).read_bytes()
     )
@@ -251,7 +259,7 @@ def evaluate(
         raise typer.BadParameter("run not found", param_hint="run_id")
     dataset = _run_dataset(run_root, store, run_value)
     records = verified_split(dataset, "test")
-    config = TrainingConfig.model_validate_json(
+    config = RecordedTrainingConfig.model_validate_json(
         confined_path(run_root, "training-config.json", must_exist=True).read_bytes()
     )
     recover_checkpoints(artifact_root, store, run_id)
