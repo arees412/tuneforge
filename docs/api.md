@@ -2,7 +2,7 @@
 
 Start the local service with `uv run uvicorn tuneforge.api:app --host 127.0.0.1`. OpenAPI is available at `/docs`. Authentication and multi-tenant authorization are deployment responsibilities.
 
-Dataset paths are confined to the service's `datasets` directory. Register a file with `POST /datasets/register`. Planning accepts its fingerprint as `dataset_id`. Invalid LoRA targets and unsupported batch settings return HTTP 422. A source that differs from its registration causes `POST /runs` to return HTTP 409 before creating a run.
+Dataset paths are confined to the service's `datasets` directory. Register a file with `POST /datasets/register`. Planning accepts its fingerprint as `dataset_id`. Invalid LoRA targets and unsupported training settings return HTTP 422 from both `POST /training/plan` and `POST /runs` before a run starts. See the [CPU configuration contract](training.md#executable-configuration) for accepted values. A source that differs from its registration causes `POST /runs` to return HTTP 409 before creating a run.
 
 ## Cancelling a synchronous run
 

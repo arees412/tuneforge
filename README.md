@@ -43,6 +43,8 @@ API datasets are confined to `.tuneforge/datasets`. Copy a local input there bef
 
 ## Workflow configuration
 
+The CPU backend uses a constant learning rate with zero warmup, saves checkpoints by step, and records a metric for each optimizer update. Held-out scoring is explicit through `tuneforge evaluate RUN_ID --root ROOT`. See the [accepted training settings](docs/training.md#executable-configuration).
+
 ```json
 {
   "dataset_path": "datasets/instructions.jsonl",

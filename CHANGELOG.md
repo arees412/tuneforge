@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Enforced the CPU training configuration at planning, execution and restart. New workflows default to explicit evaluation. Historical checkpoints retain their recorded configuration for held-out scoring. See the [training contract](docs/training.md#executable-configuration).
+
 ## 0.1.0 - 2026-09-26
 
 - Added strict dataset intake, canonical normalization, deterministic fingerprints/splits, duplicate and leakage controls, quality reporting, and tokenization analysis.
